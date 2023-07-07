@@ -1,5 +1,5 @@
 ---
-title: "Mathematica Code Sample 1"
+title: "Bail Program Evaluation"
 author: "Sophie Bair"
 date: "6/14/2023"
 output: pdf_document
