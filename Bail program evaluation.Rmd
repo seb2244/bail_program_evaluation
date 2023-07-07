@@ -1,0 +1,305 @@
+---
+title: "Mathematica Code Sample 1"
+author: "Sophie Bair"
+date: "6/14/2023"
+output: pdf_document
+---
+
+Context: this code is taken from an assessment from another job application, with permission. I was asked to perform cleaning and merging tasks in part A, construction of new variables for analysis in part B, and finally evaluate the success of a program intended to reduce re-arrest among people on bail awaiting trial in part C. To complete part C I created a multiple logistic regression model which used program participation to predict re-arrest while controlling for other relevant variables. 
+
+```{r}
+# import libraries 
+library(lubridate)
+library(dplyr)
+library(boot)
+```
+
+```{r}
+# import files 
+case <- read.csv('case.csv')
+demo <- read.csv('demo.csv')
+grades <- read.csv('grades.csv')
+prior_arrests <- read.csv('prior_arrests.csv')
+
+dim(case)
+dim(demo)
+dim(grades)
+dim(prior_arrests)
+
+head(case)
+head(demo)
+head(grades)
+head(prior_arrests)
+```
+
+Part A: Data Management 
+
+Q1 - Recode gender so that males are consistently coded as “M” and females are
+consistently coded as “F”. Provide a frequency count of the recoded variable.
+```{r}
+table(demo$gender)
+
+demo$clean_gender = ifelse(demo$gender %in% c('F', 'female'), 'F', 'M')
+
+table(demo$clean_gender)
+```
+
+Q2 - Merge the case and demo datasets together so that each row in the case dataset also contains the demographics of the defendant. 
+```{r}
+range(case$person_id)
+range(demo$person_id)
+
+length(unique(case$person_id))
+length(unique(demo$person_id))
+# person IDs are in same format and have same range, so should be ok to merge 
+# however there are potential duplicates 
+```
+
+```{r}
+case_dd <- case[!duplicated(case), ]
+demo_dd <- demo[!duplicated(demo), ]
+
+dim(case)
+dim(case_dd)
+dim(demo)
+dim(demo_dd)
+# no exact duplicates in case file (indicating there are likely multiple distinct cases per ID)
+# but lots of exact duplicates in demo - now that these have been removed there is 1 record per ID (n=15715)
+```
+
+```{r}
+case_demo <- merge(case, demo_dd, 'person_id')
+dim(case_demo)
+```
+
+Q3 - Restrict the data to only individuals who were arrested in Chicago.
+```{r}
+get_city <- function(address){
+  address_char <- as.character(address)
+  return(toupper(substr(address_char, nchar(address_char)-6, nchar(address_char))))
+}
+
+case_demo$city <- sapply(case_demo$address, get_city)
+table(case_demo$city)
+```
+```{r}
+case_demo_chi <- case_demo[case_demo$city == 'CHICAGO', ]
+dim(case_demo_chi)
+```
+
+Part B: Variable Creation
+
+Q4 - Create an age variable equal to the defendant’s age (in whole years) at the time of arrest for each case and create summary statistics. 
+```{r}
+# check for unreasonable bdates/arrest dates
+min(as.Date(case_demo_chi$bdate))
+max(as.Date(case_demo_chi$bdate))
+
+min(as.Date(case_demo_chi$arrest_date))
+max(as.Date(case_demo_chi$arrest_date))
+```
+
+```{r}
+get_age <- function(dob, arrest){
+  return(as.period(interval(start = as.Date(dob), end = as.Date(arrest)))$year)
+}
+
+case_demo_chi$age <- mapply(get_age, case_demo_chi$bdate, case_demo_chi$arrest_date)
+head(case_demo_chi)
+```
+```{r}
+min(case_demo_chi$age)
+max(case_demo_chi$age)
+mean(case_demo_chi$age)
+median(case_demo_chi$age)
+```
+
+Q5 - Create a GPA variable using a 4 point scale, where: A=4, B=3, C=2, D=1, and F=0
+
+```{r}
+# clean grades and turn into yearly GPA 
+
+code_gpa <- function(grade){
+  if(grade == 'A'){
+    return(4)
+  }else if(grade =='B'){
+    return(3)
+  }else if(grade =='C'){
+    return(2)
+  }else if(grade =='D'){
+    return(1)
+  }else if(grade =='F'){
+    return(0)
+  }else{
+    return(NA)
+  }
+}
+
+coded_gpas <- apply(grades %>% select(starts_with('gr')), c(1, 2), code_gpa)
+grades_clean <- as.data.frame(cbind(grades$person_id, coded_gpas))
+colnames(grades_clean) <- colnames(grades)
+head(grades_clean)
+```
+
+```{r}
+grades_clean$gr9_gpa <- rowMeans(as.data.frame(grades_clean %>% select(starts_with('gr9'))), na.rm=TRUE)
+grades_clean$gr10_gpa <- rowMeans(as.data.frame(grades_clean %>% select(starts_with('gr10'))), na.rm=TRUE)
+head(grades_clean)
+```
+
+```{r}
+# make sure everything is ok to join 
+range(grades$person_id)
+dim(grades)
+dim(grades[!duplicated(grades$person_id), ]) # each ID only has one set of grades 
+```
+
+```{r}
+case_demo_grades_chi <- merge(case_demo_chi, grades_clean, all.x=TRUE)
+head(case_demo_grades_chi)
+```
+```{r}
+length(unique(case_demo_grades_chi[!is.na(case_demo_grades_chi$gr9_gpa),'person_id']))
+# all 11251 cases in the grades file were matched 
+# however, there are students without grades data 
+```
+
+```{r}
+mean(case_demo_grades_chi$gr9_gpa, na.rm=TRUE)
+mean(case_demo_grades_chi$gr10_gpa, na.rm=TRUE)
+```
+
+Part C: Statistical Analysis
+
+Q6 - summarize the demographic characteristics of the study population
+```{r}
+table(case_demo_chi$race)
+prop.table(table(case_demo_chi$race))
+table(case_demo_chi$clean_gender)
+prop.table(table(case_demo_chi$clean_gender))
+
+prop.table(table(case_demo_chi$clean_gender, case_demo_chi$race))
+```
+```{r}
+hist(case_demo_chi$age)
+```
+
+Q7 - Are the treatment and control groups balanced on demographics, or are there differences in the composition of the two groups?
+
+```{r}
+treatment <- case_demo_chi[case_demo_chi$treat == 1,]
+nrow(treatment)
+control <- case_demo_chi[case_demo_chi$treat == 0,]
+nrow(control)
+```
+
+Demographic data 
+```{r}
+prop.table(table(treatment$clean_gender))
+prop.table(table(control$clean_gender))
+```
+```{r}
+prop.table(table(treatment$race))
+prop.table(table(control$race))
+```
+
+```{r}
+mean(treatment$age)
+mean(control$age)
+```
+
+```{r}
+h1 <- hist(treatment$age, plot=FALSE, breaks=28)
+h2 <- hist(control$age, plot=FALSE, breaks=28)
+
+c1 <- rgb(173,216,230,max = 255, alpha = 80, names = "lt.blue")
+c2 <- rgb(255,192,203, max = 255, alpha = 80, names = "lt.pink")
+
+plot(h1, col = c1, main='Age at arrest for treatment and control groups', xlab='Age')
+plot(h2, col = c2, add = TRUE)
+legend("right", legend=c('Treatment', 'Control'), fill = c(c1, c2))
+```
+
+Q8 - Did enrolling in the program reduce the likelihood of re-arrest before disposition?
+```{r}
+boxplot(case_demo_chi$age~case_demo_chi$re_arrest)
+boxplot(case_demo_chi$prior_arrests~case_demo_chi$re_arrest)
+
+# at a glance, arrestees who are older and have more prior arrests are more likely to be re-arrested
+# since the treatment/control groups are imbalanced in regards to these vars, it's important to choose a model that can control for other variables
+```
+
+```{r}
+# another helpful variable to control for could be length of time between arrest and deposition 
+# (most likely longer time -> re-arrest more likely)
+
+get_length <- function(arrest_date, deposition_date){
+  return(lubridate::interval(as.Date(arrest_date), as.Date(deposition_date)) / lubridate::duration(num = 1, units = "days"))
+}
+
+case_demo_chi$case_length <- mapply(get_length, case_demo_chi$arrest_date, case_demo_chi$dispos_date)
+head(case_demo_chi)
+
+```
+
+```{r}
+boxplot(case_demo_chi$case_length~case_demo_chi$re_arrest) # hypothesis confirmed
+```
+
+For all numerical variables, make sure that linear relationship between var and log-odds is reasonable
+
+1) prior arrests
+```{r}
+pa <- case_demo_chi %>%
+  group_by(prior_arrests) %>%
+  summarise(p = mean(re_arrest), log_odds =logit(mean(re_arrest))) # since we don't have true probabilities, using this as a rough proxy
+pa
+```
+```{r}
+plot(pa$log_odds~pa$prior_arrests)
+# this is definitely a non-linear relationship - looks like square root to me. will add in another covariate for sqrt(previous_arrests)
+```
+
+2) age 
+```{r}
+age <- case_demo_chi %>%
+  group_by(age) %>%
+  summarise(p = mean(re_arrest), log_odds =logit(mean(re_arrest))) 
+plot(age$log_odds~age$age)
+# looks reasonably linear 
+```
+
+3) case length
+```{r}
+cl <- case_demo_chi %>%
+  group_by(case_length) %>%
+  summarise(p = mean(re_arrest), log_odds =logit(mean(re_arrest))) 
+plot(cl$log_odds~cl$case_length)
+# again, looks like a sqrt function 
+```
+
+```{r}
+# prep vars for a regression model 
+case_demo_chi$black_ind = ifelse(case_demo_chi$race == 'BLACK', 1, 0)
+case_demo_chi$white_ind = ifelse(case_demo_chi$race == 'WHITE', 1, 0)
+case_demo_chi$female_ind = ifelse(case_demo_chi$clean_gender == 'F', 1, 0)
+
+case_demo_chi$prior_arrests_sqrt <- sqrt(case_demo_chi$prior_arrests)
+case_demo_chi$case_length_sqrt <- sqrt(case_demo_chi$case_length)
+```
+
+```{r}
+logit <- glm(data=case_demo_chi, family=binomial(link='logit'), re_arrest~treat+prior_arrests+prior_arrests_sqrt+age+black_ind+white_ind+female_ind+case_length+case_length_sqrt)
+
+summary(logit)
+```
+```{r}
+confint(logit, 'treat', .95)
+```
+
+```{r}
+exp(1)^-0.0944238  
+# so treatment increases odds of re-arrest by a factor of ~.91 (aka it decreases it by a factor of ~.09)
+```
+
+Based on the data we have, I concluded that the program was associated with a reduction in the likelihood of re-arrest before deposition. To test this hypothesis, I created a multiple logistic regression model which used program participation to predict re-arrest while controlling for age, race, gender, number of prior arrests, and length of time between arrest and deposition. I found that, controlling for all other factors, enrollment in the program was significantly associated with a reduction in the odds of re-arrest before deposition. However, I cannot confidently say that the program caused this reduction, since I’m not sure how participants were assigned to the treatment or control groups—if there was any selection bias in that process then there could be confounding variables that account for this association that are not captured in our dataset. 
